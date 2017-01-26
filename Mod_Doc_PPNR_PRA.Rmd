@@ -19,24 +19,27 @@ source("/Users/JasonWang/Documents/LibR/fun_generic.R")
 
 # Introduction
 
-In this report, we model UK banking industry level **`r desc_bus_driver`** using economic and financial variables, provided by Bank of England. Given the developed model will be subject to expert override to reflect idiosyncratic characteristics of the bank, we choose to a model specification of linear regression with maximum three regressors.
 
 ```{r importData, include=FALSE}
 env_data <- new.env()
 load("DATA/DataRaw_PRA_eco.Rdata", envir = env_data)
 #######################################
 nam_bus_driver <- "BUS_IND_NII_VOL"
-desc_bus_driver <- "L&A volume"
+desc_bus_driver <- "Loan & Advance volume"
 kappa_thres_condNumber <- 200
 ######################################
 ```
+
+
+In this report, we model UK banking industry level **`r desc_bus_driver`** using economic and financial variables, provided by Bank of England. Given the developed model will be subject to expert override to reflect idiosyncratic characteristics of the bank, we choose to a model specification of linear regression with maximum three regressors.
+
 
 # Data Transformation
 The nominal values of almost all economic variables are not stationary. For simplicity, we choose to model differences of the variables, in order to fit a linear regression model. Thus, we perform the following transformation on the time series data:
 
 * log difference, $\Delta_t = \log(y_t) - \log(y_{t-1})$: is applied for nominal value or price, such as GDP values and equity indices 
 * absolute difference: $\Delta_t = y_t - ly_{t-1}$: is applied to the rates or ratios, such as interest rates
-* as-is: $\Delta_t = y_t$: is applied to the growth rates such as household income growthes
+* as-is: $\Delta_t = y_t$: is applied to the growth rates such as household income growths
 
 This is a common approach to model the economic / financial variables, as the differences of time series are more likely to be stationary (will be verified by the statistical tests in Appendix A). 
 
@@ -68,7 +71,7 @@ df_meta_info <- df_meta_data_2_mod
 To fit a linear regression model, we choose the transformed economic variables (i.e., regressors) that are stationary (model assumption) and statistically significant correlated to the response variable of the model. Specifically, an economic variable is chosen as a candidate of the regression model if all of the following conditions are met:
 
 * its transformed time series must be stationary. The stationary tests are performed and described in Appendix A.
-* the correlation between the response variable (differenced / transformed) and the economic variable or its lagged version (i.e., differences and lagged ldifferences by one quarter) must be statistically significant. The correlations are estimated with associated statistical significance tests and described in Appendix B.
+* the correlation between the response variable (differenced / transformed) and the economic variable or its lagged version (i.e., differences and lagged differences by one quarter) must be statistically significant. The correlations are estimated with associated statistical significance tests and described in Appendix B.
 
 
 ```{r stationarity_corr, message = FALSE, results='hide', include=FALSE}
