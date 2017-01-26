@@ -1,0 +1,404 @@
+---
+title: "Business Driver Linear Regression Model"
+author: "(Jason) Xiayan Wang"
+date: "February 2017"
+output:
+  html_notebook:
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+rm(list = ls())
+source("/Users/JasonWang/Documents/LibR/fun_generic.R")
+```
+
+
+
+# Introduction
+
+In this report, we model UK banking industry level **`r desc_bus_driver`** using economic and financial variables, provided by Bank of England. Given the developed model will be subject to expert override to reflect idiosyncratic characteristics of the bank, we choose to a model specification of linear regression with maximum three regressors.
+
+```{r importData, include=FALSE}
+env_data <- new.env()
+load("DATA/DataRaw_PRA_eco.Rdata", envir = env_data)
+#######################################
+nam_bus_driver <- "BUS_IND_NII_VOL"
+desc_bus_driver <- "L&A volume"
+kappa_thres_condNumber <- 200
+######################################
+```
+
+# Data Transformation
+The nominal values of almost all economic variables are not stationary. For simplicity, we choose to model differences of the variables, in order to fit a linear regression model. Thus, we perform the following transformation on the time series data:
+
+* log difference, $\Delta_t = \log(y_t) - \log(y_{t-1})$: is applied for nominal value or price, such as GDP values and equity indices 
+* absolute difference: $\Delta_t = y_t - ly_{t-1}$: is applied to the rates or ratios, such as interest rates
+* as-is: $\Delta_t = y_t$: is applied to the growth rates such as household income growthes
+
+This is a common approach to model the economic / financial variables, as the differences of time series are more likely to be stationary (will be verified by the statistical tests in Appendix A). 
+
+
+
+
+```{r dataTransformation, include=FALSE}
+date_thres_eco <- max("2001-01-01", filter(env_data$lst_busVar$meta, varR == nam_bus_driver)[["date_beg"]])
+nam_eco_excl <- env_data$lst_eco$meta$varR[env_data$lst_eco$meta$date_beg > date_thres_eco]
+date_range <- c(date_thres_eco, min(c(filter(env_data$lst_busVar$meta, varR == nam_bus_driver)[["date_end"]], 
+                                      filter(env_data$lst_eco$meta, (!(varR %in% nam_eco_excl)))[["date_end"]])))
+df_data_2_mod <- env_data$lst_eco$data %>% 
+  select(-one_of(nam_eco_excl)) %>% 
+  filter(date >= date_range[1] & date <= date_range[2]) %>% 
+  left_join(select(env_data$lst_busVar$data, date, one_of(nam_bus_driver)), "date")
+df_meta_data_2_mod <- filter(env_data$lst_eco$meta, (!(varR %in% nam_eco_excl))) %>% 
+  merge(filter(env_data$lst_busVar$meta, varR == nam_bus_driver), all=TRUE) %>% 
+  as_tibble()
+## data transformation: log diff, or abs diff or as-is according to tranf_type
+df_diff <- Get_df_diff_lag(df_data_2_mod, df_meta_data_2_mod, nr_lag=1)
+df_meta_info <- df_meta_data_2_mod
+```
+
+
+
+
+# Model Candidate Regressor Selection {#secDriverSelect}
+
+To fit a linear regression model, we choose the transformed economic variables (i.e., regressors) that are stationary (model assumption) and statistically significant correlated to the response variable of the model. Specifically, an economic variable is chosen as a candidate of the regression model if all of the following conditions are met:
+
+* its transformed time series must be stationary. The stationary tests are performed and described in Appendix A.
+* the correlation between the response variable (differenced / transformed) and the economic variable or its lagged version (i.e., differences and lagged ldifferences by one quarter) must be statistically significant. The correlations are estimated with associated statistical significance tests and described in Appendix B.
+
+
+```{r stationarity_corr, message = FALSE, results='hide', include=FALSE}
+## stationarity analysis 
+res_station <- df_diff %>%
+  select(-date) %>%
+  TestsStationaryPval(show.conclusion=TRUE) %>%
+  select(-res.KPSS.trend)
+res_station$Conclusion <- ifelse(apply(res_station, 1, function(x) sum(x == "Stationary")) >=2, "Stationary", "Not")
+## correlation analysis
+df_tmp <- select(df_diff, -date, -one_of(nam_bus_driver))
+vec_bus_series <- df_diff[[nam_bus_driver]]
+res_corr_lag1 <- Cal_Corr_Vec_Df(vec_bus_series[-1], df_tmp[-NROW(df_tmp), ]) %>% 
+  rename(estimate.lag1 = estimate, p.value.lag1 = p.value)
+res_corr_NII <- Cal_Corr_Vec_Df(vec_bus_series, df_tmp) %>% 
+  left_join(res_corr_lag1, by="variable") %>% 
+  mutate(Conclusion = ifelse(p.value < 0.05 | p.value.lag1 < 0.05, "Significant", "Not"))
+## select stationary eco
+df_tmp <- res_station %>% 
+  filter(Conclusion != "Not") %>% 
+  select(variable, Conclusion) %>% 
+  rename(con.stationarity = Conclusion)
+## select significant eco and statioanry eco
+nam_eco_sel <- res_corr_NII %>% 
+  filter(Conclusion != "Not") %>% 
+  select(variable, Conclusion) %>% 
+  rename(con.correlation = Conclusion) %>% 
+  inner_join(df_tmp, by="variable") %>% 
+  select(variable)
+```
+
+
+To model `r desc_bus_driver`, a set of economic variables (together with their 1-quarter-lagged values) are selected according the above criteria and summarized in the following table.
+
+```{r}
+df_meta_info %>% 
+  filter(varR %in% nam_eco_sel$variable) %>% 
+  select(varR, desc, tranf_type) %>% 
+  DT::datatable(rownames = FALSE, options=list(pageLength = 5, searchHighlight = TRUE, scrollX = TRUE), caption="Chosen candidate regressor for linear model")
+```
+
+
+# Model Development
+
+Given the developed model will be subject to expert override to reflect idiosyncratic characteristics of the bank, a linear regression model with maximum three regressor is chosen. The following sections explain the strategy adopted to develop such a model. The model regressors contains all the selected economic variables and their 1-quarter-lagged values. 
+
+
+## Mitigate multicollinearity
+
+```{r getData2ModFit, message = FALSE, results='hide', include=FALSE}
+## get lag1 df: remove the lastest observation, i.e, the last row!
+df_tmp <- df_diff %>% 
+  select(one_of(nam_eco_sel$variable)) %>% 
+  slice(-NROW(df_diff))
+names(df_tmp) <- paste0(names(df_tmp), "_lag1")
+df_mod_raw <- df_diff %>% 
+  select(date, one_of(c(nam_eco_sel$variable, nam_bus_driver))) %>% 
+  slice(-1) %>% 
+  bind_cols(df_tmp)
+nam_2_modFit <- Get_MatName_Kappa_Strategy(select(df_mod_raw, -date, -one_of(nam_bus_driver)), thres_condNumber=kappa_thres_condNumber)
+df_mod_fit <- df_mod_raw %>% 
+  select(date, one_of(c(nam_bus_driver, as.character(nam_2_modFit)))) %>%  # make dummy variable for quarterly indicator
+  mutate(quarter_num = ifelse(lubridate::month(date) <= 3, 0,
+                              ifelse(lubridate::month(date) <= 6, 1,
+                                     ifelse(lubridate::month(date) <= 9, 2, 3)))) 
+```
+
+To mitigate [multicollinearity](https://en.wikipedia.org/wiki/Multicollinearity) in the linear model fitting, we perform Condition Number analysis on the regressor matrix. A rule of thumb that condition number of a regressor matrix larger than `r kappa_thres_condNumber` indicates severe multicollinearity. Considering a regressor matrix consists of $p$ regressors and each regressor is a column vector of that matrix, i.e.,  $X = [X_1, ..., X_p]$, the condition number statistics, $\kappa$, is then defined as 
+$$  
+\kappa = \sqrt{\frac{\lambda_{\min}}{\lambda_{\max}}}, 
+$$
+where $\lambda_{\min}$ and $\lambda_{\max}$ is the minimum and maximum values of the eigenvalues of matrix $X^T X$. 
+
+<!-- To mitigate multicollinearity in the model specification, we design the following algorithm to remove regressors leading to strong multicollinearity: -->
+<!-- * Step 1: Calculate $\kappa$ of the regressor matrix $X$ -->
+<!-- * Step 2: For each regressor $X_i$, construct a matrix $X$ -->
+<!-- calculate $\Delta_i$ -->
+
+
+To mitigate multicollinearity in the model specification, we design the following strategy to remove regressors leading to strong multicollinearity:
+
+* Step 1: Calculate condition number statistic for the regressor matrix
+* Step 2: For each regressor, calculate condition number statistic of the regressor matrix without the interested regressor and then record the estimate deviation from the one obtained by Step 1.
+* Step 3: Construct a new regressor matrix by remove the regressor associated with the largest deviation
+* Repeat the above steps until the condition statistic of the re-constructed regressor matrix is below 30.
+
+Following the above strategy, we can reduce amount of regressors from `r ncol(df_mod_raw)-1` to `r length(nam_2_modFit)`. The regressors summarized in the following table are used for linear model selection.
+
+```{r}
+tab_eco_modSel <- tibble::tibble(regressor = nam_2_modFit, varR = gsub("_lag1", "", nam_2_modFit), lagged = grepl("_lag1", nam_2_modFit)) %>% 
+  left_join(select(df_meta_info, varR, desc, tranf_type), by="varR") 
+tab_eco_modSel %>% 
+  select(-regressor) %>% 
+  DT::datatable(rownames = FALSE, options=list(pageLength = 5, searchHighlight = TRUE, scrollX = TRUE), caption="Chosen regressor for linear model fitting / selection")
+```
+
+
+
+## Linear model selection
+
+Using the chosen regressor (shown in the above table), there are `r factorial(nrow(tab_eco_modSel))/factorial(nrow(tab_eco_modSel) - 3)` different linear models with three regressors. Among these linear models, we choose the one with highest [$R^2$](https://en.wikipedia.org/wiki/Coefficient_of_determination). 
+
+
+```{r subsetMod}
+eval(parse(text=paste0(
+  "mod_fit_subset <- leaps::regsubsets(", nam_bus_driver, " ~ . , data=select(df_mod_fit, -date), nvmax=3)"
+)))
+## select and keep the drivers
+nam_subset_modSelect <- intersect(names(coef(mod_fit_subset, which.max(summary(mod_fit_subset)$adjr2))), names(df_mod_fit)) 
+tab_eco_modSel %>% 
+  filter(regressor %in% nam_subset_modSelect) %>% 
+  select(-regressor) %>% 
+  DT::datatable(options=list(dom = 't'), caption="Chosen three regressors by Best Subset algorithm")
+```
+
+
+<!-- ### Model selection by Lasso regression -->
+
+<!-- ```{r modSel_Lasso} -->
+<!-- inp_y <- as.vector(eval(parse(text = paste0("df_mod_fit$", nam_bus_driver)))) -->
+<!-- inp_X <- as.matrix(as.data.frame(select(df_mod_fit, -date, -one_of(nam_bus_driver)))) -->
+<!-- ix_train <- lubridate::year(df_mod_fit$date) %in% (2000:2112) -->
+<!-- grid_prop <- 10^seq(10, -2, length=100) -->
+<!-- #  -->
+<!-- set.seed(123) -->
+<!-- cv_lasso <- glmnet::cv.glmnet(inp_X[ix_train, ], inp_y[ix_train], alpha = 1, lambda = grid_prop, standardize = T) -->
+<!-- plot(cv_lasso) -->
+<!-- lam_sel <- cv_lasso$lambda -->
+<!-- mod_lasso <- glmnet::glmnet(inp_X, inp_y, alpha = 1, lambda = grid_prop, standardize = T) -->
+<!-- coef_lasso <- predict(mod_lasso, type="coefficients", s=lam_sel)[1:16, ] -->
+<!-- ``` -->
+
+
+
+## Selected linear model
+The linear 3-regressor-model with the highest overall fitness are summarized in the following table.
+
+```{r}
+eval(parse(text=paste0(
+  "mod_lm_fit <- lm(", nam_bus_driver, " ~ . , data=select(df_mod_fit, one_of(nam_bus_driver, as.character(nam_subset_modSelect))))"
+)))
+mod_res_col <- tibble::lst(mod_lm_fit = mod_lm_fit)
+mod_res_col$mod_est <- broom::tidy(mod_lm_fit)
+mod_res_col$mod_est %>% 
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"), function(x) round(x, digits=3)) %>% 
+  DT::datatable(options=list(dom = 't'), caption="Selected linear model", rownames = FALSE)
+```
+
+The overall fitness of the selected model, [adjusted $R^2$](https://en.wikipedia.org/wiki/Coefficient_of_determination), is `r round(summary(mod_res_col$mod_lm_fit)$adj.r.squared, 2)`. The standard residual diagnostic plots are shown below. 
+
+```{r }
+par(mfrow=c(2,2))
+plot(mod_res_col$mod_lm_fit, pch=23, bg='blue', cex=1)
+par(mfrow=c(1,1))
+```
+
+# Model Diagnositc
+
+In this section, we firstly examine presence of multicolinearity. Next, we assess whether assumption of linear regression holds for the fitted model. There are four principal assumptions which justify the use of linear regression models for purposes of inference or prediction:
+
+* linearity and additivity of the relationship between dependent and independent variables:
+
+    <!-- + The expected value of dependent variable is a straight-line function of each independent variable, holding the others fixed. -->
+    <!-- + The slope of that line does not depend on the values of the other variables. -->
+    <!-- + The effects of different independent variables on the expected value of the dependent variable are additive. -->
+* statistical independence of the model residuals (in particular, no auto-correlation in the case of time series data)
+
+* homoscedasticity (constant variance) of the model residual
+
+    <!-- + versus time (in the case of time series data) -->
+    <!-- + versus the predictions -->
+    <!-- + versus any independent variable -->
+* normality of the model residual distribution
+
+
+```{r testResiduals}
+mod_res_col$mod_diag <- Test_Mod_Residuals(mod_res_col$mod_lm_fit)
+```
+
+
+## Multicolinearity among model drivers
+
+Firstly, we can conduct graphic inspection of correlation among the chosen regressors.  
+
+```{r}
+nam_eco_modFit <- mod_res_col$mod_est$term[!grepl("Intercept", mod_res_col$mod_est$term)]
+eval(parse(text = paste0(
+  "pairs(~ ", paste(nam_eco_modFit, collapse = "+"), ", data=df_mod_fit)"
+)))
+```
+
+
+
+
+To quantify multicolinearity, we can determine Variance Inflation Factor (VIF) of each model driver. The general rule of thumb is that VIFs exceeding 4 warrant further investigation, while VIFs exceeding 10 are signs of serious multicollinearity requiring correction. The following table summarizes VIF statistics for each regressor.
+
+```{r}
+data.frame(VIF = car::vif(mod_res_col$mod_lm_fit)) %>%  
+  DT::datatable(options=list(dom = 't'), caption="VIF of model drivers")
+```
+
+
+
+
+## Residual linearity and additivity 
+
+Residual linearity can be assessed by graphic inspection.
+
+```{r residLinear, echo=FALSE}
+tmp <- car::residualPlots(mod_res_col$mod_lm_fit, tests=FALSE) 
+tmp
+```
+
+The [Tukey](https://en.wikipedia.org/wiki/Tukey%27s_test_of_additivity) test of additivity result implies `r ifelse(tail(tmp[, 2], 1) <= 0.05, "", "no")` statistically significant nonadditivity.   
+
+
+The following figure are the plots of the response variable against each numeric predictor, including a Lowess fit. 
+```{r}
+car::marginalModelPlots(mod_res_col$mod_lm_fit)
+```
+
+
+## Residual normality
+To examine model residual normality, we perform both [Shapiro–Wilk](https://en.wikipedia.org/wiki/Shapiro%E2%80%93Wilk_test) and [Anderson–Darling](https://en.wikipedia.org/wiki/Anderson%E2%80%93Darling_test) tests. Both tests have null hypothesis of normality. The test results are summarized in the following table.
+
+```{r}
+tab_res <- mod_res_col$mod_diag %>% 
+  filter(grepl("normality", method)) 
+DT::datatable(tab_res, rownames = FALSE, options=list(dom = 't'), caption="Residual normality tests")
+```
+
+The test results indicates model residuals are `r ifelse(all(tab_res$conclusion == "Pass"), "", "not ")` normally distributed.
+
+
+In addition, QQ plot is produced to inspect residual normality visually.
+
+```{r}
+car::qqPlot(mod_lm_fit)
+```
+
+
+## Residual randomness and autocorrelation
+
+[Durbin Waton](https://en.wikipedia.org/wiki/Durbin%E2%80%93Watson_statistic) test is perform to examine significance of residual auto-correlation. The test has null hypothesis of no 1-lag auto-correlation presence. The results are shown in the following table.
+
+```{r}
+mod_res_col$mod_diag %>% 
+  filter(grepl("Durbin", method)) %>% 
+  DT::datatable(rownames = FALSE, options=list(dom = 't'), caption="Residual autocorrelation test (1-lag)")
+```
+
+Both [Box-Ljung](https://en.wikipedia.org/wiki/Ljung%E2%80%93Box_test) and Box-Pierce tests are performed to examine significance of residual serial auto-correlation. Both tests have null hypothesis of no auto-correlation presence in the first ten lags. The results are shown in the following table.
+
+```{r}
+tab_res <- mod_res_col$mod_diag %>% 
+  filter(grepl("Box", method)) 
+DT::datatable(tab_res, rownames = FALSE, options=list(dom = 't'), caption="Residual autocorrelation tests (10-lags)")
+```
+
+The test results indicates that there are `r ifelse(all(tab_res$conclusion == "Pass"), "no persence of", "")` statistically significant auto-correlation in the first-ten lags of the model residuals.
+
+## Residual homoscedasticity
+
+To examine homoscedasticity of the model residuals, [Breush Pagan](https://en.wikipedia.org/wiki/Breusch%E2%80%93Pagan_test) test is performed. The Breush Pagan test assesses whether the variance of the model residuals is dependent on the model regressors. If so, heteroskedasticity is present. The null hypothesis of the is that homoscedastic model residuals. 
+
+
+```{r}
+tab_res <- mod_res_col$mod_diag %>% 
+  filter(grepl("Breusch", method)) 
+DT::datatable(tab_res, rownames = FALSE, options=list(dom = 't'), caption="Residual homoscedasticity test")
+```
+Since the p-value of the test indicates we can `r ifelse(tab_res$p.value < 0.05, "reject", "not reject")` the test null hypothesis, we can conclude that model residual homoscedasticity `r ifelse(tab_res$p.value < 0.05, "does not hold.", "holds")`.
+
+
+
+<!-- save fit results -->
+```{r saveRdata}
+save(nam_bus_driver, df_mod_fit, df_meta_info, mod_res_col, res_station, file = paste0('DATA/mod_fit_', nam_bus_driver,'.Rdata'))
+```
+
+<!-- ## PCA -->
+
+<!-- ```{r} -->
+<!-- df_diff %>%  -->
+<!--   select(one_of(nam_eco_sel$variable)) %>%  -->
+<!--   prcomp(center=TRUE, scale.=TRUE) %>%  -->
+<!--   summary() -->
+<!-- ``` -->
+
+
+# Appendix
+
+## Appendix A: stationarity tests
+
+The stationary tests, namely, [augmented Dickey-Fuller](https://en.wikipedia.org/wiki/Dickey%E2%80%93Fuller_test) (ADF), [Kwiatkowski-Phillips-Schmidt-Shin](https://en.wikipedia.org/wiki/KPSS_test) (KPSS) and [Phillips-Perron](https://en.wikipedia.org/wiki/Phillips%E2%80%93Perron_test) (PP) are performed on each business driver and economic variable. 
+
+
+
+### Appendix A.1: stationarity of business drivers
+
+The following table summarizes the stationarity test results for the business drivers. We consider a variable that is able to pass any two of the three tests is stationary. 
+
+```{r}
+res_station %>% 
+  filter(grepl("BUS_IND_", variable)) %>% 
+  DT::datatable(rownames = FALSE, options=list(dom = 't'), caption="Stationarity of business drivers")
+```
+
+### Appendix A.2: stationarity of economic variables
+
+
+
+The following table summarizes the stationarity test results for the economic variables. We consider a variable that is able to pass any two of the three tests is stationary. 
+
+```{r}
+res_station %>% 
+  filter((!grepl("BUS_IND_", variable))) %>% 
+  DT::datatable(rownames = FALSE, options=list(pageLength = 5, searchHighlight = TRUE, scrollX = TRUE), caption="Stationarity of economic variables")
+```
+
+
+## Appendix B: correlation analysis
+
+### Appendix B.1: correaltion to `r desc_bus_driver`
+
+The following table summarizes correlation estimates between the `r desc_bus_driver` and each of the economic variables. In addition, the p-value of estimate significance is given for each correlation estimate. Furthermore, we estimate correlations between the `r desc_bus_driver` and lagged (1 quarter) economic variable. The results are summarized in the following table.
+
+```{r}
+res_corr_NII %>% 
+  DT::datatable(rownames = FALSE, options=list(pageLength = 5, searchHighlight = TRUE, scrollX = TRUE), caption="Correaltion between business driver and each of economic variables")
+```
+
+
