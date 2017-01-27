@@ -21,6 +21,7 @@ source("/Users/JasonWang/Documents/LibR/fun_generic.R")
 
 
 ```{r importData, include=FALSE}
+
 env_data <- new.env()
 load("DATA/DataRaw_PRA_eco.Rdata", envir = env_data)
 #######################################
@@ -349,7 +350,7 @@ Since the p-value of the test indicates we can `r ifelse(tab_res$p.value < 0.05,
 
 <!-- save fit results -->
 ```{r saveRdata}
-save(nam_bus_driver, df_mod_fit, df_meta_info, mod_res_col, res_station, file = paste0('DATA/mod_fit_', nam_bus_driver,'.Rdata'))
+save(nam_bus_driver, df_mod_fit, df_meta_info, mod_res_col, res_station, file = paste0('DATA/mod_fit_', nam_bus_driver,'_PRA2016.Rdata'))
 ```
 
 <!-- ## PCA -->
