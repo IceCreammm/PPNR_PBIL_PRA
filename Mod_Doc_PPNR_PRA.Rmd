@@ -13,24 +13,23 @@ output:
 knitr::opts_chunk$set(echo = FALSE)
 rm(list = ls())
 source("/Users/JasonWang/Documents/LibR/fun_generic.R")
+# source("/Users/JasonWang/Documents/LibR/fun_ICAAP_stressTesting.R")
 ```
 
 
 
 # Introduction
 
-
 ```{r importData, include=FALSE}
-
 env_data <- new.env()
 load("DATA/DataRaw_PRA_eco.Rdata", envir = env_data)
 #######################################
 nam_bus_driver <- "BUS_IND_NII_VOL"
 desc_bus_driver <- "Loan & Advance volume"
 kappa_thres_condNumber <- 200
+nam_data_projection <- c("base", "stress")
 ######################################
 ```
-
 
 In this report, we model UK banking industry level **`r desc_bus_driver`** using economic and financial variables, provided by Bank of England. Given the developed model will be subject to expert override to reflect idiosyncratic characteristics of the bank, we choose to a model specification of linear regression with maximum three regressors.
 
@@ -40,7 +39,7 @@ The nominal values of almost all economic variables are not stationary. For simp
 
 * log difference, $\Delta_t = \log(y_t) - \log(y_{t-1})$: is applied for nominal value or price, such as GDP values and equity indices 
 * absolute difference: $\Delta_t = y_t - ly_{t-1}$: is applied to the rates or ratios, such as interest rates
-* as-is: $\Delta_t = y_t$: is applied to the growth rates such as household income growths
+* as-is: $\Delta_t = y_t$: is applied to the growth rates such as household income growthes
 
 This is a common approach to model the economic / financial variables, as the differences of time series are more likely to be stationary (will be verified by the statistical tests in Appendix A). 
 
@@ -62,6 +61,14 @@ df_meta_data_2_mod <- filter(env_data$lst_eco$meta, (!(varR %in% nam_eco_excl)))
 ## data transformation: log diff, or abs diff or as-is according to tranf_type
 df_diff <- Get_df_diff_lag(df_data_2_mod, df_meta_data_2_mod, nr_lag=1)
 df_meta_info <- df_meta_data_2_mod
+## Prepare Stress data delta values:
+stopifnot(all(nam_data_projection %in% names(env_data$lst_eco)))
+lst_diff_scenario <- purrr::map(nam_data_projection, function(x){
+  Get_df_diff_lag(env_data$lst_eco[[x]], env_data$lst_eco$meta, nr_lag=1)
+})
+names(lst_diff_scenario) <- nam_data_projection
+## prepare lst containing data pass to SHINY
+lst_data2Mod <- lst(data = df_data_2_mod, df_diff = df_diff, lst_diff_scenario = lst_diff_scenario, meta = df_meta_data_2_mod)
 ```
 
 
@@ -72,7 +79,7 @@ df_meta_info <- df_meta_data_2_mod
 To fit a linear regression model, we choose the transformed economic variables (i.e., regressors) that are stationary (model assumption) and statistically significant correlated to the response variable of the model. Specifically, an economic variable is chosen as a candidate of the regression model if all of the following conditions are met:
 
 * its transformed time series must be stationary. The stationary tests are performed and described in Appendix A.
-* the correlation between the response variable (differenced / transformed) and the economic variable or its lagged version (i.e., differences and lagged differences by one quarter) must be statistically significant. The correlations are estimated with associated statistical significance tests and described in Appendix B.
+* the correlation between the response variable (differenced / transformed) and the economic variable or its lagged version (i.e., differences and lagged ldifferences by one quarter) must be statistically significant. The correlations are estimated with associated statistical significance tests and described in Appendix B.
 
 
 ```{r stationarity_corr, message = FALSE, results='hide', include=FALSE}
@@ -124,14 +131,11 @@ Given the developed model will be subject to expert override to reflect idiosync
 
 ```{r getData2ModFit, message = FALSE, results='hide', include=FALSE}
 ## get lag1 df: remove the lastest observation, i.e, the last row!
-df_tmp <- df_diff %>% 
-  select(one_of(nam_eco_sel$variable)) %>% 
-  slice(-NROW(df_diff))
-names(df_tmp) <- paste0(names(df_tmp), "_lag1")
 df_mod_raw <- df_diff %>% 
-  select(date, one_of(c(nam_eco_sel$variable, nam_bus_driver))) %>% 
-  slice(-1) %>% 
-  bind_cols(df_tmp)
+  select(date, one_of(unique(c(nam_eco_sel$variable, nam_bus_driver)))) %>% 
+  Prep_Df_Incl_1_Lagged_Var() %>% 
+  select(-one_of(paste(paste0(nam_bus_driver, "_lag1"), collapse = ", ")))
+## by kapper further remove some candidate drivers
 nam_2_modFit <- Get_MatName_Kappa_Strategy(select(df_mod_raw, -date, -one_of(nam_bus_driver)), thres_condNumber=kappa_thres_condNumber)
 df_mod_fit <- df_mod_raw %>% 
   select(date, one_of(c(nam_bus_driver, as.character(nam_2_modFit)))) %>%  # make dummy variable for quarterly indicator
@@ -350,7 +354,7 @@ Since the p-value of the test indicates we can `r ifelse(tab_res$p.value < 0.05,
 
 <!-- save fit results -->
 ```{r saveRdata}
-save(nam_bus_driver, df_mod_fit, df_meta_info, mod_res_col, res_station, file = paste0('DATA/mod_fit_', nam_bus_driver,'_PRA2016.Rdata'))
+save(nam_bus_driver, df_mod_fit, df_meta_info, mod_res_col, res_station, lst_data2Mod, file = paste0('DATA/mod_fit_', nam_bus_driver,'_PRA2016.Rdata'))
 ```
 
 <!-- ## PCA -->
